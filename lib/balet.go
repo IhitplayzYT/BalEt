@@ -230,9 +230,7 @@ func (b *BalEt) _handle_rr(r *Request) {
 					break
 				}
 			}
-
 		}
-
 	}
 	b.mtx.Lock()
 	v,ok := b._conn_map.Get(i)
@@ -293,10 +291,6 @@ func (b *BalEt) _handle_lc(r *Request) {
 		}
 		return true
 	})
-
-
-
-
 }
 
 func (b *BalEt) _handle_wc(r *Request) {
