@@ -37,6 +37,7 @@ type LogManager struct{
 	mx_l  	  uint64
 	flsh_freq uint64
 	_cur 	  uint64
+	mtx       sync.Mutex
 }
 
 func NewLogManager(fpath string,flsh uint64,mx_l uint64) LogManager{
@@ -79,6 +80,9 @@ func (l * LogManager) Log(reqstr string,resp string){
 
 
 func (l * LogManager) LazyLog(reqstr string,resp string){
+	l.mtx.Lock()
+	defer l.mtx.Unlock()
+	
 	hr,min,sec := time.Now().Clock()
 	t_str := fmt.Sprintf("%v:%v:%v",hr,min,sec)
 	to_write := fmt.Sprintf("\n[%v]: %v\n%v\n",t_str,reqstr,resp)
@@ -171,17 +175,19 @@ func (b *BalEt) submit(r Request) {
 }
 
 func (b *BalEt) add_server(s Server) {
+	b.mtx.Lock()
 	b.servers = append(b.servers, s)
 	b._conn_map.Set(b.srvr_cnt,0)
 	b._w_map[b.srvr_cnt] = s._w
 	b.srvr_cnt += 1
+	b.mtx.Unlock()
 }
 
 func (b *BalEt) run() {
 	for {
 		select {
 		case k := <-b.reqs:
-			b._proc_req(&k)
+			go b._proc_req(&k)
 		default:
 		}
 	}
@@ -203,14 +209,24 @@ func (b *BalEt) _proc_req(r *Request) {
 
 func (b *BalEt) _handle_rr(r *Request) {
 	// Use srvr_roor_pfx to prefix every route req
+	b.mtx.Lock()
 	l := uint64(len(b.servers))
+	b.mtx.Unlock()
 	i := uint64(0)
 	for ;i < l;i++{
-		if resp, err := http.Get(b.servers[b._cur].ip + "/health"); err != nil {
+		b.mtx.Lock()
+		cur := b._cur
+		b.mtx.Unlock()
+		b.mtx.Lock()
+		serverIP := b.servers[cur].ip
+		b.mtx.Unlock()
+		if resp, err := http.Get(serverIP + "/health"); err != nil {
 			defer resp.Body.Close()
 			if body, err := io.ReadAll(resp.Body); err != nil {
 				if resp.StatusCode == http.StatusOK && strings.Contains(strings.ToLower(string(body)), "ok") {
+					b.mtx.Lock()
 					b._cur = (b._cur + i) % l
+					b.mtx.Unlock()
 					break
 				}
 			}
@@ -218,46 +234,58 @@ func (b *BalEt) _handle_rr(r *Request) {
 		}
 
 	}
+	b.mtx.Lock()
 	v,ok := b._conn_map.Get(i)
 	if ok{
 		b._conn_map.Set(i,v+1)
 	}else{
 		b._conn_map.Set(i,1)
 	}
+	b.mtx.Unlock()
 	
 	// Route to _cnt Server
 	b._send_to(i,r)
 
+	b.mtx.Lock()
 	v,ok = b._conn_map.Get(i)
 	if ok && v > 0{
 		b._conn_map.Set(i,v-1)
 	}else{
 		b._conn_map.Set(i,0)
 	}
+	b.mtx.Unlock()
 }
 
 func (b *BalEt) _handle_lc(r *Request) {
 	b._conn_map.Descend(0,func(key uint64, value uint64) bool{
-		if resp, err := http.Get(b.servers[b._cur].ip + "/health"); err != nil {
+		b.mtx.Lock()
+		cur := b._cur
+		serverIP := b.servers[cur].ip
+		b.mtx.Unlock()
+		if resp, err := http.Get(serverIP + "/health"); err != nil {
 			defer resp.Body.Close()
 			if body, err := io.ReadAll(resp.Body); err != nil {
 				if resp.StatusCode == http.StatusOK && strings.Contains(strings.ToLower(string(body)), "ok") {
+					b.mtx.Lock()
 					v,ok := b._conn_map.Get(key)
 					if ok{
 						b._conn_map.Set(key,v+1)
 					}else{
 						b._conn_map.Set(key,1)
 					}
+					b.mtx.Unlock()
 					
 					// Route to _cnt Server
 					b._send_to(key,r)
 
+					b.mtx.Lock()
 					v,ok = b._conn_map.Get(key)
 					if ok && v > 0{
 						b._conn_map.Set(key,v-1)
 					}else{
 						b._conn_map.Set(key,0)
 					}
+					b.mtx.Unlock()
 					return false 
 				}
 			}
@@ -273,32 +301,42 @@ func (b *BalEt) _handle_lc(r *Request) {
 
 func (b *BalEt) _handle_wc(r *Request) {
 	var scores btree.Map[uint64,float64]
+	b.mtx.Lock()
 	for i,v := range b.servers{
 		conns,_ := b._conn_map.Get(uint64(i))
 		scores.Set(uint64(i),float64(conns)/v._w)
 	}
+	b.mtx.Unlock()
 
 	scores.Ascend(0,func(key uint64, value float64) bool {
-		if resp, err := http.Get(b.servers[b._cur].ip + "/health"); err != nil {
+		b.mtx.Lock()
+		cur := b._cur
+		serverIP := b.servers[cur].ip
+		b.mtx.Unlock()
+		if resp, err := http.Get(serverIP + "/health"); err != nil {
 			defer resp.Body.Close()
 			if body, err := io.ReadAll(resp.Body); err != nil {
 				if resp.StatusCode == http.StatusOK && strings.Contains(strings.ToLower(string(body)), "ok") {
+					b.mtx.Lock()
 					v,ok := b._conn_map.Get(key)
 					if ok{
 						b._conn_map.Set(key,v+1)
 					}else{
 						b._conn_map.Set(key,1)
 					}
+					b.mtx.Unlock()
 					
 					// Route to _cnt Server
 					b._send_to(key,r)
 
+					b.mtx.Lock()
 					v,ok = b._conn_map.Get(key)
 					if ok && v > 0{
 						b._conn_map.Set(key,v-1)
 					}else{
 						b._conn_map.Set(key,0)
 					}
+					b.mtx.Unlock()
 					return false 
 				}
 			}
@@ -313,7 +351,9 @@ func (b *BalEt) _handle_wc(r *Request) {
 }
 
 func (b * BalEt) _send_to(i uint64,r * Request){
+	b.mtx.Lock()
 	ipstr := "http://" + b.servers[i].ip + IF(strings.HasPrefix(r.param_url,"/"),"","/") + r.param_url
+	b.mtx.Unlock()
 
 	switch strings.ToLower(r.method){
 	case "post":
